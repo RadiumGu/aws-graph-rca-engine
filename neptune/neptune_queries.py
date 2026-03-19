@@ -1,7 +1,7 @@
 """
 neptune_queries.py - RCA 核心图谱查询（Q1/Q2/Q3）
 """
-import neptune_client as nc
+from neptune import neptune_client as nc
 
 def q1_blast_radius(failed_node: str) -> dict:
     """

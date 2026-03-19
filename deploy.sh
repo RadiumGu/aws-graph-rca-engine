@@ -82,14 +82,19 @@ if ! $DRY_RUN; then
   BUILD_DIR=$(mktemp -d)
   trap "rm -rf $BUILD_DIR" EXIT
 
-  # Copy source files (flat, Lambda-compatible)
-  cp "$SCRIPT_DIR"/*.py "$SCRIPT_DIR"/*.json "$SCRIPT_DIR"/deploy.sh "$BUILD_DIR/" 2>/dev/null
+  # Copy source files preserving subdirectory structure (Lambda-compatible)
+  cp "$SCRIPT_DIR"/*.py "$BUILD_DIR/" 2>/dev/null
+  for dir in core neptune collectors actions data; do
+    if [ -d "$SCRIPT_DIR/$dir" ]; then
+      cp -r "$SCRIPT_DIR/$dir" "$BUILD_DIR/"
+    fi
+  done
   # Install dependencies
   pip3 install requests -t "$BUILD_DIR" -q
   # Package
   cd "$BUILD_DIR"
   rm -f /tmp/rca-engine.zip
-  zip -r /tmp/rca-engine.zip . -x "*.pyc" -x "__pycache__/*" -x "deploy.sh" -x "scan-service-db-mapping.py"
+  zip -r /tmp/rca-engine.zip . -x "*.pyc" -x "__pycache__/*" -x "deploy.sh" -x "scripts/*"
   echo "Package size: $(du -sh /tmp/rca-engine.zip | cut -f1)"
   cd "$SCRIPT_DIR"
 else

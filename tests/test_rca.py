@@ -52,43 +52,60 @@ for _pkg in ['boto3', 'botocore', 'botocore.auth', 'botocore.awsrequest',
     if _pkg not in sys.modules:
         _make_stub(_pkg)
 
-# Pre-stub rca_engine sub-modules BEFORE importing the package.
-# The package directory IS rca_engine/, so we need careful import ordering.
-# rca_engine/rca_engine.py does "from .config import CANONICAL" at module level.
+# Pre-stub heavy dependencies BEFORE importing any submodule.
 
-# Step 1: Ensure rca_engine is recognized as a package (not the .py file)
 import importlib
 
-# Step 2: Stub neptune_client, neptune_queries, eks_auth at module level
-# before any rca_engine submodule tries to import them.
-# Stub at BOTH rca_engine.X (package import) and X (absolute import) levels
-# because Lambda uses absolute imports but tests run as package.
-_nc_stub = _make_stub('rca_engine.neptune_client')
+# Step 2: Stub neptune, neptune.neptune_client, neptune.neptune_queries
+# Modules in core/ and actions/ use absolute imports:
+#   from neptune import neptune_client as nc
+#   from neptune import neptune_queries as nq
+# We stub these at both the package level and via sys.modules aliases.
+
+_neptune_pkg = _make_stub('neptune')
+sys.modules['neptune'] = _neptune_pkg
+
+_nc_stub = _make_stub('neptune.neptune_client')
 _nc_stub.results = MagicMock(return_value=[])
 _nc_stub.query = MagicMock(return_value={'results': []})
-sys.modules['neptune_client'] = _nc_stub
+sys.modules['neptune.neptune_client'] = _nc_stub
+_neptune_pkg.neptune_client = _nc_stub
 
-_nq_stub = _make_stub('rca_engine.neptune_queries')
+_nq_stub = _make_stub('neptune.neptune_queries')
 _nq_stub.q1_blast_radius = MagicMock(return_value={'capabilities': [], 'services': []})
 _nq_stub.q4_service_info = MagicMock(return_value={'priority': 'Tier1', 'tier': 1})
 _nq_stub.q5_similar_incidents = MagicMock(return_value=[])
 _nq_stub.q8_log_source = MagicMock(return_value='')
-sys.modules['neptune_queries'] = _nq_stub
+sys.modules['neptune.neptune_queries'] = _nq_stub
+_neptune_pkg.neptune_queries = _nq_stub
 
-_eks_stub = _make_stub('rca_engine.eks_auth')
+# collectors package and eks_auth stub
+_collectors_pkg = _make_stub('collectors')
+sys.modules['collectors'] = _collectors_pkg
+
+_eks_stub = _make_stub('collectors.eks_auth')
 _eks_stub.get_eks_token = MagicMock(return_value='fake-token')
 _eks_stub.get_k8s_endpoint = MagicMock(return_value=('https://fake-endpoint', 'fake-token'))
 _eks_stub.write_ca = MagicMock(return_value='/tmp/fake-ca.crt')
-sys.modules['eks_auth'] = _eks_stub
+sys.modules['collectors.eks_auth'] = _eks_stub
+_collectors_pkg.eks_auth = _eks_stub
 
-# Also stub config at top-level so absolute "from config import" works
-# (config.py is a real file, just ensure it's importable both ways)
+# infra_collector stub (imported by graph_rag_reporter at module level)
+_ic_stub = _make_stub('collectors.infra_collector')
+_ic_stub.collect = MagicMock(return_value={'pods': [], 'databases': [], 'mapping': []})
+_ic_stub.format_for_prompt = MagicMock(return_value='[基础设施状态]\n- N/A')
+sys.modules['collectors.infra_collector'] = _ic_stub
+_collectors_pkg.infra_collector = _ic_stub
 
-# Step 3: Now import rca_engine submodules we actually need for testing
+# actions package stub (semi_auto imports action_executor and slack_notifier from actions)
+_actions_pkg = _make_stub('actions')
+sys.modules['actions'] = _actions_pkg
+
+# Step 3: Now import the submodules we actually need for testing
 from rca_engine.config import CANONICAL  # noqa: E402
-from rca_engine import rca_engine as rca_mod  # noqa: E402
-from rca_engine import fault_classifier  # noqa: E402
-from rca_engine import playbook_engine  # noqa: E402
+from rca_engine.core import rca_engine as rca_mod  # noqa: E402
+from rca_engine.core import fault_classifier  # noqa: E402
+from rca_engine.actions import playbook_engine  # noqa: E402
 
 
 # ===========================================================================
@@ -98,8 +115,7 @@ from rca_engine import playbook_engine  # noqa: E402
 class TestStep4Score(unittest.TestCase):
 
     def setUp(self):
-        # Import lazily so stubs are already in place
-        from rca_engine import rca_engine as re_mod
+        from rca_engine.core import rca_engine as re_mod
         self.step4_score = re_mod.step4_score
 
     def _error_service(self, name, first_error='2026-01-01T00:00:00', count=10, rate=60.0):
@@ -152,7 +168,7 @@ class TestStep4Score(unittest.TestCase):
 class TestFaultClassifier(unittest.TestCase):
 
     def setUp(self):
-        from rca_engine import fault_classifier
+        from rca_engine.core import fault_classifier
         self.classify = fault_classifier.classify
 
     def _signal(self, value=0.5, threshold=0.05):
@@ -212,7 +228,7 @@ class TestFaultClassifier(unittest.TestCase):
 class TestPlaybookMatch(unittest.TestCase):
 
     def setUp(self):
-        from rca_engine import playbook_engine
+        from rca_engine.actions import playbook_engine
         self.match = playbook_engine.match
 
     def _ctx(self, service='test-svc', severity='P1', metric='error_rate', value=0.5,

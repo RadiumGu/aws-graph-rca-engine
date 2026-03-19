@@ -42,7 +42,8 @@ def _parse_cw_alarm(alarm):
     }
 
 def lambda_handler(event, context):
-    import fault_classifier, playbook_engine, semi_auto, rca_engine, slack_notifier
+    from core import fault_classifier, rca_engine
+    from actions import playbook_engine, semi_auto, slack_notifier
 
     logger.info(f"RCA triggered: {json.dumps(event)[:300]}")
 
@@ -65,7 +66,7 @@ def lambda_handler(event, context):
     # 支持 resolve 操作（由 Slack interaction 或手动调用）
     if signal.get('action') == 'resolve' and signal.get('incident_id'):
         try:
-            import incident_writer
+            from actions import incident_writer
             incident_writer.resolve_incident(
                 signal['incident_id'],
                 signal.get('resolution', 'manual resolve'),
@@ -102,7 +103,7 @@ def lambda_handler(event, context):
             rca_result = rca_engine.analyze(affected_service, classification)
             # Graph RAG：用 Bedrock + Neptune + CloudWatch 生成报告
             try:
-                import graph_rag_reporter
+                from core import graph_rag_reporter
                 _log_samples = rca_result.get('log_samples', {})
                 rag_report = graph_rag_reporter.generate_rca_report(
                     affected_service, classification, rca_result,
@@ -129,7 +130,7 @@ def lambda_handler(event, context):
     incident_id = None
     if severity in ('P0', 'P1') and rca_result:
         try:
-            import incident_writer
+            from actions import incident_writer
             incident_id = incident_writer.write_incident(classification, rca_result)
             logger.info(f"Incident created: {incident_id}")
         except Exception as e:
@@ -139,7 +140,7 @@ def lambda_handler(event, context):
     repeat_info = None
     if severity in ('P0', 'P1'):
         try:
-            import rca_engine as rca_mod
+            from core import rca_engine as rca_mod
             repeat_info = rca_mod.check_repeat_incidents(affected_service)
             if repeat_info.get('needs_deep_rca'):
                 _send_repeat_alert(affected_service, repeat_info, classification)

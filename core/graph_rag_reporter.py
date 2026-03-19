@@ -11,7 +11,7 @@ import os
 import json
 import logging
 import boto3
-import infra_collector
+from collectors import infra_collector
 from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
@@ -34,8 +34,8 @@ SVC_TO_CW = {
 def _get_neptune_subgraph(affected_service: str) -> str:
     """提取受影响服务的多层依赖子图，包括基础设施层"""
     try:
-        import neptune_client as nc
-        import neptune_queries as nq
+        from neptune import neptune_client as nc
+        from neptune import neptune_queries as nq
 
         # 上游调用者
         callers = nc.results(

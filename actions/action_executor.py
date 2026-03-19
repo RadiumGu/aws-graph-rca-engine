@@ -40,7 +40,7 @@ def _get_k8s_client():
         return _k8s_apps_v1
 
     from kubernetes import client as k8s_client
-    from eks_auth import get_k8s_endpoint, get_eks_token, write_ca
+    from collectors.eks_auth import get_k8s_endpoint, get_eks_token, write_ca
 
     endpoint, ca_data = get_k8s_endpoint(EKS_CLUSTER)
     token = get_eks_token(EKS_CLUSTER)

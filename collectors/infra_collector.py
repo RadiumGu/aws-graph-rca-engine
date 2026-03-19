@@ -16,7 +16,7 @@ EKS_CLUSTER = os.environ.get('EKS_CLUSTER_NAME', 'PetSite')
 
 # ---- DB Mapping ----
 
-_DB_MAPPING_PATH = os.path.join(os.path.dirname(__file__), 'service-db-mapping.json')
+_DB_MAPPING_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data', 'service-db-mapping.json')
 _db_mapping_cache: list | None = None
 
 
@@ -40,7 +40,7 @@ def get_service_db(service_name):
 
 def _get_k8s_token():
     try:
-        from eks_auth import get_k8s_endpoint, get_eks_token
+        from collectors.eks_auth import get_k8s_endpoint, get_eks_token
         endpoint, ca_data = get_k8s_endpoint(EKS_CLUSTER)
         token = get_eks_token(EKS_CLUSTER)
         return endpoint, token, ca_data
@@ -82,7 +82,7 @@ def get_pods_for_service(service_name, namespace='default'):
     labels = list(dict.fromkeys([k8s_label, service_name, service_name.replace('-deployment', '')]))
     ctx = ssl.create_default_context()
     if ca_data:
-        from eks_auth import write_ca
+        from collectors.eks_auth import write_ca
         ca_path = write_ca(ca_data)
         ctx.load_verify_locations(ca_path)
     else:

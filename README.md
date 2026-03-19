@@ -25,12 +25,12 @@ CloudWatch Alarm (HealthyHostCount < 2)
           │
   ┌───────┼──────────────────────────────────────────────────────┐
   ▼       ▼                                                      ▼
-fault_    rca_engine.py                              graph_rag_reporter.py
-classifier  Multi-layer RCA:                           Bedrock Claude
-  │       1.  DeepFlow L7 (HTTP 5xx call chain)        + Neptune subgraph
+core/     core/rca_engine.py                         core/graph_rag_reporter.py
+fault_      Multi-layer RCA:                           Bedrock Claude
+classifier  1.  DeepFlow L7 (HTTP 5xx call chain)      + Neptune subgraph
   │       1b. DeepFlow L4 (TCP RST/timeout/SYN重传)    + Service→Pod→EC2→AZ path
   │       2.  CloudTrail change events                 + CloudWatch metrics
-  │       3.  Neptune graph candidates                 + infra_collector
+  │       3.  Neptune graph candidates                 + collectors/infra_collector
   │           ├─ Service call chain (Calls/DependsOn)  + CW Logs sampling
   │           ├─ Infra: graph traversal (q10)          → structured RCA report
   │           └─ Infra: EC2 API fallback
@@ -38,16 +38,16 @@ classifier  Multi-layer RCA:                           Bedrock Claude
   │       3c. CW Logs sampling (ERROR/FATAL)
   │       4.  Confidence scoring (max 100)
   │             │
-  │       neptune_queries.py    infra_collector.py
-  │       Q1-Q8 (service layer)  real-time Pod status (K8s API)
-  │       Q9-Q11 (infra layer)   real-time DB metrics (CloudWatch RDS)
+  │       neptune/neptune_queries.py  collectors/infra_collector.py
+  │       Q1-Q8 (service layer)       real-time Pod status (K8s API)
+  │       Q9-Q11 (infra layer)        real-time DB metrics (CloudWatch RDS)
   ▼
-playbook_engine.py → semi_auto.py → action_executor.py
-(fault playbooks)   (semi-auto)     (kubectl rollout/scale via EKS token)
+actions/playbook_engine.py → actions/semi_auto.py → actions/action_executor.py
+(fault playbooks)            (semi-auto)             (kubectl rollout/scale via EKS token)
           │
           ▼
-  slack_notifier.py      ← Slack Incoming Webhook + confirmation buttons
-  incident_writer.py     ← Neptune Incident node + S3 archive + Bedrock KB index
+  actions/slack_notifier.py  ← Slack Incoming Webhook + confirmation buttons
+  actions/incident_writer.py ← Neptune Incident node + S3 archive + Bedrock KB index
 ```
 
 ---
@@ -174,12 +174,13 @@ bash deploy.sh --dry-run # Preview only
 ```
 
 `deploy.sh` performs:
-1. `pip install requests` into source dir
-2. `zip` from source directory (flat structure, no nested paths)
-3. `aws lambda update-function-code`
-4. Configure environment variables (reads Slack webhook from SSM)
-5. Create/verify SNS topic + Lambda subscription
-6. Smoke test
+1. `pip install requests` into build dir
+2. Recursively copies source directories (`core/`, `neptune/`, `collectors/`, `actions/`, `data/`) + root `.py` files
+3. `zip` into Lambda deployment package
+4. `aws lambda update-function-code`
+5. Configure environment variables (reads Slack webhook from SSM)
+6. Create/verify SNS topic + Lambda subscription
+7. Smoke test
 
 ### 3. Trigger
 
@@ -210,35 +211,77 @@ cat /tmp/rca-output.json | python3 -m json.tool
 
 ## Module Reference
 
-| File | Role |
-|------|------|
-| `handler.py` | Lambda entry point; parses SNS/CW events, orchestrates all modules |
-| `config.py` | Canonical K8s deployment ↔ Neptune service name mapping |
-| `fault_classifier.py` | Severity grading (P0/P1/P2); auto-execution gate |
-| `rca_engine.py` | Multi-layer RCA: DeepFlow L7/L4 + CloudTrail + Neptune graph + EC2 API fallback + scoring |
-| `neptune_queries.py` | Neptune openCypher queries Q1–Q11 (service + infrastructure layer) |
-| `neptune_client.py` | Neptune HTTP client with IAM SigV4 signing |
-| `graph_rag_reporter.py` | Graph RAG: Neptune subgraph + infra path + all signals → Claude → structured report |
-| `infra_collector.py` | Real-time Pod status (K8s API) + DB metrics (CloudWatch RDS) |
-| `eks_auth.py` | Shared EKS bearer token generation (SigV4 presigned STS URL) |
-| `playbook_engine.py` | Fault playbook matching (4 predefined patterns) |
-| `semi_auto.py` | P1/P2 semi-automatic execution; Slack confirmation flow |
-| `action_executor.py` | kubectl operations: rollout restart/undo, scale replicas |
-| `slack_notifier.py` | Slack message formatting + Incoming Webhook delivery |
-| `incident_writer.py` | Neptune Incident node + S3 archive + Bedrock KB indexing |
-| `service-db-mapping.json` | Service → DB cluster mapping |
-| `scripts/scan-service-db-mapping.py` | Scans K8s Deployments to discover service→DB relationships |
+| Module | File | Role |
+|--------|------|------|
+| _(root)_ | `handler.py` | Lambda entry point; parses SNS/CW events, orchestrates all modules |
+| _(root)_ | `config.py` | Canonical K8s deployment ↔ Neptune service name mapping |
+| **core/** | `rca_engine.py` | Multi-layer RCA: DeepFlow L7/L4 + CloudTrail + Neptune graph + EC2 API fallback + scoring |
+| **core/** | `fault_classifier.py` | Severity grading (P0/P1/P2); auto-execution gate |
+| **core/** | `graph_rag_reporter.py` | Graph RAG: Neptune subgraph + infra path + all signals → Claude → structured report |
+| **neptune/** | `neptune_client.py` | Neptune HTTP client with IAM SigV4 signing |
+| **neptune/** | `neptune_queries.py` | Neptune openCypher queries Q1–Q11 (service + infrastructure layer) |
+| **collectors/** | `infra_collector.py` | Real-time Pod status (K8s API) + DB metrics (CloudWatch RDS) |
+| **collectors/** | `eks_auth.py` | Shared EKS bearer token generation (SigV4 presigned STS URL) |
+| **actions/** | `action_executor.py` | kubectl operations: rollout restart/undo, scale replicas |
+| **actions/** | `playbook_engine.py` | Fault playbook matching (4 predefined patterns) |
+| **actions/** | `semi_auto.py` | P1/P2 semi-automatic execution; Slack confirmation flow |
+| **actions/** | `slack_notifier.py` | Slack message formatting + Incoming Webhook delivery |
+| **actions/** | `incident_writer.py` | Neptune Incident node + S3 archive + Bedrock KB indexing |
+| **data/** | `service-db-mapping.json` | Service → DB cluster mapping |
+| **scripts/** | `scan-service-db-mapping.py` | Scans K8s Deployments to discover service→DB relationships |
 
 ---
 
 ## Testing
 
 ```bash
-# Run from parent directory (avoids filename/module shadowing)
+# Run tests with pytest (recommended)
 cd <project-parent-dir>
+python3 -m pytest rca_engine/tests/test_rca.py -v
+
+# Or with unittest
 python3 -m unittest rca_engine.tests.test_rca -v
 
 # 17 tests: TestStep4Score(5) + TestFaultClassifier(5) + TestPlaybookMatch(7)
+```
+
+---
+
+## Project Structure
+
+```
+rca_engine/
+├── handler.py                  # Lambda entry point (must stay in root)
+├── config.py                   # K8s deployment ↔ Neptune name mapping
+├── __init__.py
+├── core/                       # Core RCA logic
+│   ├── rca_engine.py           # Multi-layer RCA engine (705 lines)
+│   ├── fault_classifier.py     # P0/P1/P2 severity grading
+│   └── graph_rag_reporter.py   # Bedrock Claude Graph RAG report
+├── neptune/                    # Graph database layer
+│   ├── neptune_client.py       # SigV4-signed HTTP client
+│   └── neptune_queries.py      # Q1-Q11 openCypher queries
+├── collectors/                 # Real-time data collection
+│   ├── infra_collector.py      # K8s Pod status + RDS metrics
+│   └── eks_auth.py             # EKS bearer token generation
+├── actions/                    # Execution & notification
+│   ├── action_executor.py      # kubectl rollout/scale operations
+│   ├── playbook_engine.py      # Fault playbook matching
+│   ├── semi_auto.py            # Semi-automatic execution flow
+│   ├── slack_notifier.py       # Slack webhook delivery
+│   └── incident_writer.py      # Neptune + S3 + Bedrock KB
+├── data/
+│   └── service-db-mapping.json # Service → DB cluster mapping
+├── scripts/
+│   └── scan-service-db-mapping.py
+├── tests/
+│   └── test_rca.py             # 17 unit tests
+├── docs/
+│   ├── TDD-fault-recovery-rca.md
+│   └── RCA-SYSTEM-DOC.md
+├── deploy.sh                   # Lambda packaging + deployment
+├── .env.example
+└── README.md
 ```
 
 ---

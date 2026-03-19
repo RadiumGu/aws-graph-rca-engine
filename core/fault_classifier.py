@@ -3,7 +3,7 @@ fault_classifier.py - 故障严重度评估
 P0 / P1 / P2 分级逻辑
 """
 import logging
-import neptune_queries as nq
+from neptune import neptune_queries as nq
 
 logger = logging.getLogger(__name__)
 

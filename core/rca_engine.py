@@ -173,9 +173,9 @@ def step3_graph_candidates(affected_service: str, error_services: list) -> list:
       1) 服务调用链：Calls/DependsOn 方向找链路起点
       2) 基础设施链：Service→Pod→EC2Instance 找故障节点
     """
-    import neptune_client as nc
-    import neptune_queries as nq
-    
+    from neptune import neptune_client as nc
+    from neptune import neptune_queries as nq
+
     error_svc_names = {s['service'] for s in error_services}
     
     if not error_svc_names:
@@ -286,7 +286,7 @@ def step3b_temporal_validation(affected_service: str, error_services: list) -> d
         }
     }
     """
-    import neptune_client as nc
+    from neptune import neptune_client as nc
     from datetime import datetime
 
     result = {}
@@ -379,7 +379,7 @@ def step3c_log_sampling(top_candidates: list, window_minutes: int = 5) -> dict:
     仅查 top 2 候选，避免超时。
     """
     import boto3, re, time
-    from neptune_queries import q8_log_source
+    from neptune.neptune_queries import q8_log_source
 
     logs_client = boto3.client('logs', region_name=REGION)
     end_time = int(time.time() * 1000)
@@ -541,7 +541,7 @@ def step4_score(error_services: list, cloudtrail_changes: list,
         
         # 历史故障：同一服务曾出现类似故障 +10
         try:
-            import neptune_queries as nq
+            from neptune import neptune_queries as nq
             history = nq.q5_similar_incidents(svc, limit=3)
             if history:
                 score += 10
@@ -682,7 +682,7 @@ def check_repeat_incidents(service: str, window_days: int = 7, threshold: int = 
     检查同一服务是否在近期反复故障（Phase 4：知识库监控）
     返回: {'is_repeat': bool, 'count': int, 'incidents': [...]}
     """
-    import neptune_queries as nq
+    from neptune import neptune_queries as nq
     history = nq.q5_similar_incidents(service, limit=10)
     
     # 过滤最近 window_days 天
