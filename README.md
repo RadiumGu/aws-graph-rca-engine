@@ -1,9 +1,9 @@
 # rca_engine — Neptune Graph + AIOps Root Cause Analysis Engine
 
 An AWS Lambda-based AIOps engine that:
-1. Receives CloudWatch/SNS alerts (e.g., HTTPCode_Target_5XX_Count > 5)
+1. Receives CloudWatch/SNS alerts (e.g., `HTTPCode_Target_5XX_Count > 5`)
 2. Classifies fault severity (P0/P1/P2)
-3. Runs multi-layer RCA: DeepFlow L7/L4 → CloudTrail → **Neptune graph traversal** → EC2 API fallback
+3. Runs multi-layer RCA: DeepFlow L7/L4 → CloudTrail → Neptune graph traversal → **Plugin-based AWS Service Probers**
 4. Generates a Graph RAG report via Bedrock Claude
 5. Sends Slack notification with evidence and recommended actions
 6. Writes incident to Neptune knowledge base
@@ -31,11 +31,15 @@ classifier  1.  DeepFlow L7 (HTTP 5xx call chain)      + Neptune subgraph
   │       1b. DeepFlow L4 (TCP RST/timeout/SYN重传)    + Service→Pod→EC2→AZ path
   │       2.  CloudTrail change events                 + CloudWatch metrics
   │       3.  Neptune graph candidates                 + collectors/infra_collector
-  │           ├─ Service call chain (Calls/DependsOn)  + CW Logs sampling
-  │           ├─ Infra: graph traversal (q10)          → structured RCA report
-  │           └─ Infra: EC2 API fallback
+  │           ├─ Service call chain (Calls/DependsOn)  + Layer2 AWS probe results
+  │           ├─ Infra: graph traversal (q10)          + CW Logs sampling
+  │           └─ Infra: EC2/ASG Probe (if q10 empty)  → structured RCA report
   │       3b. Temporal validation (graph depth × time)
   │       3c. CW Logs sampling (ERROR/FATAL)
+  │       3d. Layer2 AWS Service Probers (parallel)
+  │           ├─ SQSProbe / DynamoDBProbe / LambdaProbe
+  │           ├─ ALBProbe / StepFunctionsProbe
+  │           └─ EC2ASGProbe (fallback, infra only)
   │       4.  Confidence scoring (max 100)
   │             │
   │       neptune/neptune_queries.py  collectors/infra_collector.py
@@ -52,7 +56,7 @@ actions/playbook_engine.py → actions/semi_auto.py → actions/action_executor.
 
 ---
 
-## Key Design: Two-Layer Root Cause Detection
+## Key Design: Multi-Layer Root Cause Detection
 
 ### Layer 1: Neptune Graph Traversal (preferred)
 
@@ -66,18 +70,88 @@ Microservice ─[RunsOn]→ Pod ─[RunsOn]→ EC2Instance ─[LocatedIn]→ AZ
 - **Q11** expands blast radius: given faulty EC2 IDs, finds ALL impacted services (not just the alerting one)
 - Works when ETL has run recently and Neptune has up-to-date `EC2Instance.state`
 
-### Layer 2: EC2 API Fallback (real-time, infra faults only)
+### Layer 2: Plugin-based AWS Service Probers (`collectors/aws_probers.py`)
 
-Applies **only when the fault is infrastructure-related** (EC2 node failure, AZ outage) and Neptune graph traversal returns nothing due to ETL lag:
+A self-extensible probe framework that runs **in parallel (Step 3d)** alongside Neptune graph traversal to cover AWS managed service faults that Neptune cannot see.
 
-1. Queries `describe_instances` with `tag:eks:cluster-name` filter
-2. Filters for `stopped/stopping/shutting-down/terminated` states
-3. Uses `StateTransitionReason` timestamp to only include recent events (< 30 min)
-4. Feeds results back into the same scoring pipeline
+#### Design
 
-This handles the **ASG race condition**: EC2 stop → ASG terminates instance → Neptune loses the node (no `BelongsTo` edge) → EC2 API catches it.
+```
+ProbeRegistry (auto-discovery via @register_probe decorator)
+    │
+    ├── SQSProbe            ← queue backlog + DLQ accumulation
+    ├── DynamoDBProbe       ← ReadThrottle / WriteThrottle / SystemErrors
+    ├── LambdaProbe         ← Errors / Throttles / Duration near timeout
+    ├── ALBProbe            ← ELB_5XX / RejectedConnections / UnhealthyTargets / latency
+    ├── StepFunctionsProbe  ← ExecutionsFailed / TimedOut / Throttled
+    └── EC2ASGProbe         ← EKS node non-running (only when Neptune q10 found nothing)
+```
 
-> **Note**: For application-layer faults (DB connection errors, OOM, logic errors) that produce `HTTPCode_Target_5XX_Count` spikes, EC2 nodes remain `running`. In these cases, Layer 2 finds nothing and the RCA relies entirely on DeepFlow L7/L4 signals + CloudTrail + Neptune service call-chain (Layers applied in `rca_engine.py` steps 1–3).
+Each probe implements a two-method contract:
+
+```python
+class BaseProbe:
+    def is_relevant(self, signal: dict, affected_service: str) -> bool:
+        """Should this probe run for this alarm/service?"""
+
+    def probe(self, signal: dict, affected_service: str) -> Optional[ProbeResult]:
+        """Execute probe; return ProbeResult or None if nothing found."""
+```
+
+All probes return a unified `ProbeResult`:
+
+```python
+@dataclass
+class ProbeResult:
+    service_name: str    # e.g. "SQS", "DynamoDB"
+    healthy: bool        # False = anomaly detected
+    score_delta: int     # RCA confidence score bonus (0~40)
+    summary: str         # One-line finding
+    evidence: list       # Bullet points injected into Slack + Graph RAG prompt
+    details: dict        # Raw data for debugging
+```
+
+`run_all_probes()` runs all relevant probes concurrently via `ThreadPoolExecutor` (timeout=12s), then:
+- Sums `score_delta` from all anomalous probes (capped at 40)
+- Appends evidence to the `top_candidate` in the scoring pipeline
+- Injects all probe findings into the Graph RAG prompt for Bedrock Claude
+
+#### Coverage vs. fault type
+
+| Fault Type | Neptune (L1) | AWS Probers (L2) |
+|-----------|-------------|-----------------|
+| EC2 node down / AZ outage | ✅ Q10 + Q11 | ✅ EC2ASGProbe (fallback) |
+| Pod CrashLoop / OOM | ✅ Q6 + infra_collector | — |
+| RDS connection exhausted | ✅ infra_collector | — |
+| **SQS backlog / DLQ messages** | ❌ | ✅ SQSProbe |
+| **DynamoDB throttling** | ❌ | ✅ DynamoDBProbe |
+| **Lambda errors / throttles** | ❌ | ✅ LambdaProbe |
+| **ALB ELB-side 5XX / rejected connections** | ❌ | ✅ ALBProbe |
+| **Step Functions execution failure** | ❌ | ✅ StepFunctionsProbe |
+| Application code deploy error | — | ✅ CloudTrail (step2) |
+
+#### Adding a new probe
+
+No changes to `rca_engine.py` or any other file needed. Just add a class to `collectors/aws_probers.py`:
+
+```python
+@register_probe                          # auto-registers on import
+class MyServiceProbe(BaseProbe):
+
+    def is_relevant(self, signal, affected_service):
+        return affected_service in ('my-service', 'petsite')
+
+    def probe(self, signal, affected_service) -> Optional[ProbeResult]:
+        # Query AWS API / CloudWatch
+        # ...
+        return ProbeResult(
+            service_name='MyService',
+            healthy=False,
+            score_delta=20,
+            summary='Anomaly found',
+            evidence=['metric=value'],
+        )
+```
 
 ---
 
@@ -90,7 +164,7 @@ This handles the **ASG race condition**: EC2 stop → ASG terminates instance �
 | **DeepFlow / ClickHouse** | eBPF observability. `l7_flow_log` (HTTP 5xx) and `l4_flow_log` (TCP RST/timeout/SYN retrans) tables. |
 | **Bedrock** | Claude Sonnet (`bedrock:InvokeModel`) + Knowledge Base (`bedrock-agent-runtime:Retrieve`). |
 | **Slack** | Incoming Webhook URL stored in SSM Parameter Store. |
-| **IAM Role** | Lambda execution role needs: `neptune-db:*`, `eks:DescribeCluster`, `cloudtrail:LookupEvents`, `cloudwatch:GetMetricData`, `logs:*`, `ssm:GetParameter*`, `bedrock:InvokeModel`, `bedrock-agent-runtime:Retrieve`, `ec2:DescribeInstances`, `rds:Describe*`, `autoscaling:DescribeAutoScalingGroups`. |
+| **IAM Role** | Lambda execution role needs: `neptune-db:*`, `eks:DescribeCluster`, `cloudtrail:LookupEvents`, `cloudwatch:GetMetricData`, `logs:*`, `ssm:GetParameter*`, `bedrock:InvokeModel`, `bedrock-agent-runtime:Retrieve`, `ec2:DescribeInstances`, `rds:Describe*`, `autoscaling:DescribeAutoScalingGroups`, `sqs:ListQueues`, `sqs:GetQueueAttributes`, `dynamodb:ListTables`, `lambda:ListFunctions`, `lambda:GetFunctionConfiguration`, `states:ListStateMachines`, `elasticloadbalancing:Describe*`. |
 
 ---
 
@@ -101,7 +175,7 @@ This handles the **ASG race condition**: EC2 stop → ASG terminates instance �
 | `REGION` | No | `ap-northeast-1` | AWS region |
 | `NEPTUNE_ENDPOINT` | **Yes** | — | Neptune cluster endpoint hostname |
 | `NEPTUNE_PORT` | No | `8182` | Neptune port |
-| `EKS_CLUSTER_NAME` | **Yes** | — | EKS cluster name (used by infra_collector + EC2 API fallback) |
+| `EKS_CLUSTER_NAME` | **Yes** | — | EKS cluster name (used by infra_collector + EC2ASGProbe) |
 | `CLICKHOUSE_HOST` | **Yes** | — | ClickHouse/DeepFlow host (internal IP) |
 | `CLICKHOUSE_PORT` | No | `8123` | ClickHouse HTTP port |
 | `BEDROCK_MODEL` | No | `global.anthropic.claude-sonnet-4-6` | Bedrock model ID |
@@ -121,8 +195,12 @@ Base scoring (max 100):
   +10  Bedrock KB finds similar past incidents
 
 Infrastructure layer (additive):
-  +40  Graph traversal or EC2 API finds non-running EC2 nodes
+  +40  Neptune q10 or EC2ASGProbe finds non-running EC2 nodes
        (single-AZ concentration noted in evidence)
+
+Layer 2 AWS Service Probers (additive, capped at +40 total):
+  +20~30  SQS / DynamoDB / Lambda / ALB / StepFunctions anomaly detected
+  (probes run in parallel; score_delta values are summed then capped)
 
 L4 TCP signal (when L7 has no data):
   +40  SYN retransmission detected (Pod completely unreachable)
@@ -217,12 +295,13 @@ cat /tmp/rca-output.json | python3 -m json.tool
 |--------|------|------|
 | _(root)_ | `handler.py` | Lambda entry point; parses SNS/CW events, orchestrates all modules |
 | _(root)_ | `config.py` | Canonical K8s deployment ↔ Neptune service name mapping |
-| **core/** | `rca_engine.py` | Multi-layer RCA: DeepFlow L7/L4 + CloudTrail + Neptune graph + EC2 API fallback + scoring |
+| **core/** | `rca_engine.py` | Multi-layer RCA engine: DeepFlow L7/L4 + CloudTrail + Neptune graph + AWS Probers + scoring |
 | **core/** | `fault_classifier.py` | Severity grading (P0/P1/P2); auto-execution gate |
-| **core/** | `graph_rag_reporter.py` | Graph RAG: Neptune subgraph + infra path + all signals → Claude → structured report |
+| **core/** | `graph_rag_reporter.py` | Graph RAG: Neptune subgraph + all probe signals → Claude → structured report |
 | **neptune/** | `neptune_client.py` | Neptune HTTP client with IAM SigV4 signing |
 | **neptune/** | `neptune_queries.py` | Neptune openCypher queries Q1–Q11 (service + infrastructure layer) |
 | **collectors/** | `infra_collector.py` | Real-time Pod status (K8s API) + DB metrics (CloudWatch RDS) |
+| **collectors/** | `aws_probers.py` | **Plugin-based AWS Service Probers** (SQS/DynamoDB/Lambda/ALB/EC2/StepFunctions) |
 | **collectors/** | `eks_auth.py` | Shared EKS bearer token generation (SigV4 presigned STS URL) |
 | **actions/** | `action_executor.py` | kubectl operations: rollout restart/undo, scale replicas |
 | **actions/** | `playbook_engine.py` | Fault playbook matching (4 predefined patterns) |
@@ -257,7 +336,7 @@ rca_engine/
 ├── config.py                   # K8s deployment ↔ Neptune name mapping
 ├── __init__.py
 ├── core/                       # Core RCA logic
-│   ├── rca_engine.py           # Multi-layer RCA engine (705 lines)
+│   ├── rca_engine.py           # Multi-layer RCA engine
 │   ├── fault_classifier.py     # P0/P1/P2 severity grading
 │   └── graph_rag_reporter.py   # Bedrock Claude Graph RAG report
 ├── neptune/                    # Graph database layer
@@ -265,6 +344,7 @@ rca_engine/
 │   └── neptune_queries.py      # Q1-Q11 openCypher queries
 ├── collectors/                 # Real-time data collection
 │   ├── infra_collector.py      # K8s Pod status + RDS metrics
+│   ├── aws_probers.py          # ★ Plugin-based AWS Service Probers (Layer 2)
 │   └── eks_auth.py             # EKS bearer token generation
 ├── actions/                    # Execution & notification
 │   ├── action_executor.py      # kubectl rollout/scale operations
@@ -298,7 +378,7 @@ rca_engine/
 ## Known Limitations
 
 1. **Neptune write permission**: RCA Lambda has read-only access to Neptune (openCypher write returns 403). `subgraph_pattern` and `causal_weight` writes are skipped gracefully.
-2. **CloudTrail lag**: `StopInstances` events may not appear in `LookupEvents` within the first few minutes. EC2 API fallback compensates.
-3. **ETL-ASG race condition**: When EC2 is stopped, ASG terminates it quickly. ETL may not capture the `stopped` state before the instance is gone. EC2 API fallback handles this.
+2. **CloudTrail lag**: `StopInstances` events may not appear in `LookupEvents` within the first few minutes. EC2ASGProbe fallback compensates.
+3. **ETL-ASG race condition**: When EC2 is stopped, ASG terminates it quickly. ETL may not capture the `stopped` state before the instance is gone. EC2ASGProbe handles this.
 4. **Historical Pod accumulation**: Neptune retains Failed/Succeeded Pods from past deployments. The GC mechanism (`gc.py` in graph-dp-cdk) cleans some, but `Pod→EC2 RunsOn` edges for historical Pods may be stale.
- stale.
+5. **AWS Prober coverage**: Probers cover SQS/DynamoDB/Lambda/ALB/StepFunctions. Other AWS services (e.g., ElastiCache, Kinesis, API Gateway) are not yet covered. Add new probes via `@register_probe` in `collectors/aws_probers.py`.
