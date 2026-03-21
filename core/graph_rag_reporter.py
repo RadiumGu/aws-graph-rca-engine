@@ -286,7 +286,7 @@ def generate_rca_report(
         bedrock = boto3.client('bedrock-runtime', region_name=REGION)
         body = json.dumps({
             'anthropic_version': 'bedrock-2023-05-31',
-            'max_tokens': 1024,
+            'max_tokens': 8192,
             'messages': [{'role': 'user', 'content': prompt}]
         })
         resp = bedrock.invoke_model(modelId=BEDROCK_MODEL, body=body)
@@ -296,24 +296,49 @@ def generate_rca_report(
         # 提取 JSON（兼容 Claude 带 ```json ... ``` 包裹的输出）
         import re
         result = None
+        logger.info(f"Bedrock raw text (first 300): {repr(text[:300])}")
         # 方法1：去掉 markdown code fence 直接 parse
         stripped = re.sub(r'^```(?:json)?\s*', '', text.strip(), flags=re.MULTILINE)
         stripped = re.sub(r'\s*```$', '', stripped.strip(), flags=re.MULTILINE).strip()
         try:
             result = json.loads(stripped)
-        except Exception:
-            pass
-        # 方法2：找 { ... } 最外层
+            logger.info("JSON parse: method1 (stripped) succeeded")
+        except Exception as e1:
+            logger.info(f"JSON parse: method1 failed: {e1}")
+        # 方法2：找匹配的 { ... } 最外层（正确处理嵌套大括号）
         if not result:
             start = text.find('{')
-            end = text.rfind('}')
-            if start != -1 and end != -1:
-                try:
-                    result = json.loads(text[start:end+1])
-                except Exception:
-                    pass
+            if start != -1:
+                depth = 0
+                end = -1
+                for i in range(start, len(text)):
+                    if text[i] == '{':
+                        depth += 1
+                    elif text[i] == '}':
+                        depth -= 1
+                        if depth == 0:
+                            end = i
+                            break
+                if end != -1:
+                    try:
+                        result = json.loads(text[start:end+1])
+                    except Exception:
+                        pass
         if not result:
             result = {'root_cause': text[:200], 'confidence': 0, 'evidence': [], 'recommended_action': '', 'reasoning': text[:300]}
+
+        # 确保 root_cause 是字符串（LLM 偶尔返回嵌套对象）
+        if isinstance(result.get('root_cause'), dict):
+            rc = result['root_cause']
+            result['root_cause'] = rc.get('description', rc.get('summary', str(rc)[:200]))
+        
+        # 确保 confidence 是数字
+        conf = result.get('confidence', 0)
+        if isinstance(conf, str):
+            try:
+                result['confidence'] = float(conf.replace('%', ''))
+            except ValueError:
+                result['confidence'] = 0
 
         result['source'] = 'graph_rag_bedrock'
         logger.info(f"Graph RAG report: confidence={result.get('confidence')}, root_cause={result.get('root_cause','')[:60]}")

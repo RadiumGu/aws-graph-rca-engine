@@ -159,22 +159,68 @@ def _send_rag_report(rag: dict, classification: dict):
         return
     svc = classification['affected_service']
     severity = classification['severity']
-    conf = rag.get('confidence', 0)
-    root_cause = rag.get('root_cause', '未知')
-    action = rag.get('recommended_action', '人工处理')
-    reasoning = rag.get('reasoning', '')
+
+    # 防御：如果 root_cause 是嵌套 JSON 字符串，二次解析提取
+    def _unwrap_json_field(val, field_name):
+        """如果 val 是 JSON 字符串（LLM 返回了整个 JSON 而非字段值），提取指定字段"""
+        if isinstance(val, str) and val.strip().startswith('{'):
+            try:
+                parsed = json.loads(val)
+                if isinstance(parsed, dict):
+                    return parsed
+            except (json.JSONDecodeError, ValueError):
+                # 可能是截断的 JSON，尝试提取引号内的值
+                import re
+                m = re.search(rf'"{field_name}"\s*:\s*"([^"]+)"', val)
+                if m:
+                    return {field_name: m.group(1)}
+        return None
+
+    # 检查 rag 是否实际上是未解析的 JSON 字符串
+    root_cause_raw = rag.get('root_cause', '未知')
+    unwrapped = _unwrap_json_field(root_cause_raw, 'root_cause')
+    if unwrapped:
+        # root_cause 存的是整个 LLM JSON 输出，用解析后的值替换
+        rag = {**rag, **unwrapped}
+        root_cause_raw = rag.get('root_cause', '未知')
+
+    def _str(val, default='未知'):
+        if val is None:
+            return default
+        if isinstance(val, dict):
+            return val.get('root_cause', val.get('description', str(val)[:200]))
+        return str(val)
+
+    def _num(val, default=0):
+        if isinstance(val, (int, float)):
+            return val
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return default
+
+    conf = _num(rag.get('confidence', 0))
+    root_cause = _str(root_cause_raw)
+    action = _str(rag.get('recommended_action', '人工处理'))
+    reasoning = _str(rag.get('reasoning', ''))
     evidence = rag.get('evidence', [])
     source = rag.get('source', '')
     source_tag = '🤖 AI分析' if 'bedrock' in source else '📐 规则引擎'
+
+    # 确保 evidence 是 list[str]
+    if isinstance(evidence, list):
+        evidence = [_str(e, '') for e in evidence if e]
+    else:
+        evidence = [_str(evidence)]
 
     ev_text = '\n'.join(f'• {e}' for e in evidence[:3]) if evidence else '• 证据不足'
     text = (
         f"🔍 *[{severity}] RCA 报告：{svc}* {source_tag}\n\n"
         f"*根因：* {root_cause}\n"
-        f"*置信度：* {conf}%\n"
+        f"*置信度：* {conf:.0f}%\n"
         f"*建议操作：* {action}\n\n"
         f"*证据：*\n{ev_text}\n\n"
-        f"*推理：* {reasoning[:200]}"
+        f"*推理：* {reasoning[:300]}"
     )
     http = urllib3.PoolManager()
     http.request('POST', webhook, body=json.dumps({'text': text}).encode(),

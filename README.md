@@ -1,7 +1,7 @@
 # rca_engine — Neptune Graph + AIOps Root Cause Analysis Engine
 
 An AWS Lambda-based AIOps engine that:
-1. Receives CloudWatch/SNS alerts (e.g., HealthyHostCount < 2)
+1. Receives CloudWatch/SNS alerts (e.g., HTTPCode_Target_5XX_Count > 5)
 2. Classifies fault severity (P0/P1/P2)
 3. Runs multi-layer RCA: DeepFlow L7/L4 → CloudTrail → **Neptune graph traversal** → EC2 API fallback
 4. Generates a Graph RAG report via Bedrock Claude
@@ -192,7 +192,7 @@ cat << 'EOF' > /tmp/test-payload.json
 {
   "Records": [{
     "Sns": {
-      "Message": "{\"AlarmName\":\"petsite-rca-alb-5xx-high\",\"NewStateValue\":\"ALARM\",\"NewStateReason\":\"test\",\"Trigger\":{\"Namespace\":\"AWS/ApplicationELB\",\"MetricName\":\"HealthyHostCount\",\"Dimensions\":[{\"name\":\"TargetGroup\",\"value\":\"targetgroup/YOUR-TG\"},{\"name\":\"LoadBalancer\",\"value\":\"app/YOUR-ALB\"}]}}"
+      "Message": "{\"AlarmName\":\"petsite-rca-alb-5xx-high\",\"NewStateValue\":\"ALARM\",\"NewStateReason\":\"test\",\"Trigger\":{\"Namespace\":\"AWS/ApplicationELB\",\"MetricName\":\"HTTPCode_Target_5XX_Count\",\"Dimensions\":[{\"name\":\"TargetGroup\",\"value\":\"targetgroup/Servic-PetSi-BGUX1XK3RN6D/8d4815db7d125b15\"},{\"name\":\"LoadBalancer\",\"value\":\"app/Servic-PetSi-by0kpyBtxswj/bbe5082588a126fc\"}]}}"
     }
   }]
 }
@@ -299,3 +299,4 @@ rca_engine/
 2. **CloudTrail lag**: `StopInstances` events may not appear in `LookupEvents` within the first few minutes. EC2 API fallback compensates.
 3. **ETL-ASG race condition**: When EC2 is stopped, ASG terminates it quickly. ETL may not capture the `stopped` state before the instance is gone. EC2 API fallback handles this.
 4. **Historical Pod accumulation**: Neptune retains Failed/Succeeded Pods from past deployments. The GC mechanism (`gc.py` in graph-dp-cdk) cleans some, but `Pod→EC2 RunsOn` edges for historical Pods may be stale.
+ stale.
