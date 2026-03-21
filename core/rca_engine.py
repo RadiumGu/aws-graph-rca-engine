@@ -659,9 +659,32 @@ def analyze(affected_service: str, classification: dict) -> dict:
         log_samples = step3c_log_sampling(scored[:2], window_minutes=5)
     except Exception as e:
         logger.warning(f"Step3c log sampling failed (non-fatal): {e}")
-    
+
+    # Step 3d: Layer 2 — AWS Service Probers（插件化多服务探测）
+    aws_probe_results = []
+    try:
+        from collectors.aws_probers import run_all_probes, total_score_delta
+        # 告知 EC2ASGProbe 是否 Neptune 图层已找到基础设施故障（避免重复）
+        neptune_found_infra = any(c.get('infra_fault') for c in candidates)
+        probe_signal = {**classification.get('signal', {}),
+                        'neptune_infra_fault': neptune_found_infra}
+        aws_probe_results = run_all_probes(probe_signal, affected_service, timeout_sec=12)
+        # 将 probe score 叠加到 top candidate
+        probe_score_bonus = total_score_delta(aws_probe_results)
+        if probe_score_bonus > 0 and scored:
+            scored[0]['score'] = min(scored[0]['score'] + probe_score_bonus, 100)
+            scored[0]['confidence'] = round(scored[0]['score'] / 100, 2)
+            scored[0]['evidence'].append(
+                f"Layer2 AWS probers detected anomalies (+{probe_score_bonus} pts): "
+                + "; ".join(r.summary for r in aws_probe_results if not r.healthy)
+            )
+        logger.info(f"Step3d AWS probers: {len(aws_probe_results)} results, "
+                    f"bonus={probe_score_bonus}")
+    except Exception as e:
+        logger.warning(f"Step3d AWS probers failed (non-fatal): {e}")
+
     elapsed = round(time.time() - start, 1)
-    
+
     result = {
         'root_cause_candidates': scored[:3],  # Top 3
         'blast_radius': [c.get('name') for c in classification.get('affected_capabilities', [])],
@@ -670,6 +693,11 @@ def analyze(affected_service: str, classification: dict) -> dict:
         'recent_changes': changes[:5],
         'analysis_time_sec': elapsed,
         'log_samples': log_samples,
+        'aws_probe_results': [
+            {'service': r.service_name, 'healthy': r.healthy,
+             'summary': r.summary, 'evidence': r.evidence}
+            for r in aws_probe_results
+        ],
         'top_candidate': scored[0] if scored else None,
     }
     

@@ -238,6 +238,22 @@ def generate_rca_report(
         kb_lines.append("- 无相似历史案例（知识库暂无数据）")
     kb_text = '\n'.join(kb_lines)
 
+    # 6.5 Layer 2 AWS Service Probe 结果
+    probe_results = rca_result.get('aws_probe_results', [])
+    if probe_results:
+        from collectors.aws_probers import format_probe_results, ProbeResult
+        # Re-hydrate into ProbeResult objects for formatting
+        probe_objs = []
+        for r in probe_results:
+            pr = ProbeResult(
+                service_name=r['service'], healthy=r['healthy'],
+                score_delta=0, summary=r['summary'], evidence=r.get('evidence', [])
+            )
+            probe_objs.append(pr)
+        probe_text = format_probe_results(probe_objs)
+    else:
+        probe_text = "[Layer2 AWS Probers]\nNo anomalies detected across monitored AWS services."
+
     # 6. 构建 Prompt
     prompt = f"""你是一位资深 SRE，正在分析 PetSite 微服务平台的故障。
 请严格基于以下已验证的系统事实（不要推断图中不存在的关系），输出根因分析报告。
@@ -255,6 +271,8 @@ def generate_rca_report(
 {ct_text}
 
 {infra_text}
+
+{probe_text}
 
 {log_text}
 
