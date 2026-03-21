@@ -15,7 +15,7 @@ An AWS Lambda-based AIOps engine that:
 ## Architecture
 
 ```
-CloudWatch Alarm (HealthyHostCount < 2)
+CloudWatch Alarm (HTTPCode_Target_5XX_Count > 5)
           │
           ▼
        SNS Topic (petsite-rca-alerts)
