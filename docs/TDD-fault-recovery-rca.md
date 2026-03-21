@@ -1,9 +1,9 @@
 # PetSite 故障恢复与根因分析系统 — 技术设计文档
 
-> 版本：v0.1（草稿）
+> 版本：v0.1（原始设计草稿，已被实现超越）
 > 作者：小乖乖
 > 日期：2026-02-28
-> 依赖：Amazon Neptune 知识图谱、DeepFlow、CloudWatch、AWS SDK
+> **注意**：本文档为初始设计阶段的 TDD，反映设计意图与决策背景。当前系统实现已超出本文档描述范围（新增 Layer2 AWS 探针、模块化目录结构、openCypher 替代 Gremlin、Phase 1-3 全部完成）。**以 [RCA-SYSTEM-DOC.md](./RCA-SYSTEM-DOC.md) 为权威参考。**
 
 ---
 
