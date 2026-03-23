@@ -14,6 +14,44 @@ An AWS Lambda-based AIOps engine that:
 
 ---
 
+## Ecosystem — Three Projects, One Platform
+
+This repo is the **AIOps RCA engine** of a larger observability + resilience platform built around PetSite on AWS EKS. Three independent repos work together:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     PetSite on AWS EKS                          │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │
+         ┌──────────────────▼──────────────────┐
+         │  📦 graph-dp-cdk                    │
+         │  CDK infra + modular ETL pipeline   │
+         │  → builds Neptune knowledge graph   │
+         └────┬─────────────────────┬──────────┘
+              │ graph queries       │ alarm trigger
+              │                     │
+   ┌──────────▼──────────┐  ┌──────▼───────────────────┐
+   │  🔍 graph-rca-engine │  │  💥 graph-driven-chaos   │
+   │  (this repo)         │  │  AI-driven chaos         │
+   │  Multi-layer RCA     │  │  engineering platform    │
+   │  + Layer2 Probers    │  │  (Chaos Mesh + AWS FIS)  │
+   │  + Graph RAG reports │  │                          │
+   └──────────┬──────────┘  └──────┬───────────────────┘
+              │  writes incidents   │  validates RCA
+              └────────────────────┘
+                    closed loop
+```
+
+| Project | Repo | Role |
+|---------|------|------|
+| **graph-dp-cdk** | [`RadiumGu/graph-dependency-managerment`](https://github.com/RadiumGu/graph-dependency-managerment) | Infrastructure layer — CDK stacks, Neptune ETL pipeline, DeepFlow + AWS topology ingestion |
+| **graph-rca-engine** | [`RadiumGu/graph-rca-engine`](https://github.com/RadiumGu/graph-rca-engine) | AIOps RCA engine — multi-layer root cause analysis, plugin-based AWS probers, Bedrock Graph RAG reports |
+| **graph-driven-chaos** | [`RadiumGu/graph-driven-chaos`](https://github.com/RadiumGu/graph-driven-chaos) | AI-driven chaos engineering — hypothesis generation, 5-phase experiment runner, closed-loop learning |
+
+**Data flow:** `graph-dp-cdk` ETL populates Neptune → CloudWatch Alarm triggers `graph-rca-engine` → `graph-driven-chaos` injects faults to validate RCA accuracy → results feed back into Neptune.
+
+---
+
 ## Architecture
 
 ```
